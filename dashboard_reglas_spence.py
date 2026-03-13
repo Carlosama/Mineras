@@ -4,7 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.ticker import MaxNLocator
-from pathlib import Path
+from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -19,13 +20,91 @@ COL_FECHA = "Fecha_Ingreso"
 MIN_GAP_DIAS = 9
 UMBRAL_PROBLEMATICO = 30
 
-RUTA_LOCAL = Path(r"C:\Users\Carlos Molina\OneDrive - ICL CATODOS\Escritorio\Proyectos Carlos Diaz\3.- ANALISIS DE DATOS\DATOS_MINERAS.xlsx")
-# RUTA_LOCAL = Path("DATOS_MINERAS.xlsx")
-
 MINERAS_VALIDAS = [
-    "MELN", "GABY", "CEN", "ANTU", "SPNC",
-    "LOMAS", "ABRA", "MICH", "REF2", "FRANKE"
+    "MEL", "GABY", "CEN", "ANTU", "SPNC",
+    "LOMAS", "ABRA", "MICH", "REF", "FRANKE"
 ]
+
+MAPA_MINERAS = {
+    "MEL": ["MEL", "MELN"],
+    "GABY": ["GABY"],
+    "CEN": ["CEN"],
+    "ANTU": ["ANTU"],
+    "SPNC": ["SPNC"],
+    "LOMAS": ["LOMAS"],
+    "ABRA": ["ABRA"],
+    "MICH": ["MICH"],
+    "REF": ["REF", "REF2"],
+    "FRANKE": ["FRANKE"]
+}
+
+# =========================================================
+# CONEXIÓN AZURE SQL
+# =========================================================
+@st.cache_resource
+def get_engine():
+    cfg = st.secrets["azure_sql"]
+
+    connection_string = (
+        f"DRIVER={{{cfg['driver']}}};"
+        f"SERVER={cfg['server']};"
+        f"DATABASE={cfg['database']};"
+        f"UID={cfg['username']};"
+        f"PWD={cfg['password']};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate=no;"
+        f"Connection Timeout=30;"
+    )
+
+    return create_engine(
+        f"mssql+pyodbc:///?odbc_connect={quote_plus(connection_string)}",
+        pool_pre_ping=True,
+        pool_recycle=1800
+    )
+
+
+def build_minera_where(minera: str):
+    aliases = MAPA_MINERAS.get(minera, [minera])
+    condiciones = []
+    params = {}
+
+    for i, alias in enumerate(aliases):
+        key = f"tag{i}"
+        condiciones.append(f"UPPER(LTRIM(RTRIM({COL_TAG}))) LIKE :{key}")
+        params[key] = f"{alias.upper()}%"
+
+    return " OR ".join(condiciones), params
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cargar_datos_sql_por_minera(minera: str) -> pd.DataFrame:
+    engine = get_engine()
+    where_sql, params = build_minera_where(minera)
+
+    query = text(f"""
+        SELECT
+            UPPER(LTRIM(RTRIM({COL_TAG}))) AS {COL_TAG},
+            {COL_FECHA}
+        FROM dbo.mantenimientos
+        WHERE {COL_TAG} IS NOT NULL
+          AND LTRIM(RTRIM({COL_TAG})) <> ''
+          AND {COL_FECHA} IS NOT NULL
+          AND ({where_sql})
+        ORDER BY {COL_FECHA}
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(query, conn, params=params)
+
+    if df.empty:
+        return df
+
+    df[COL_TAG] = df[COL_TAG].astype(str).str.strip().str.upper()
+    df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce")
+    df = df.dropna(subset=[COL_TAG, COL_FECHA]).copy()
+
+    return df
+
 
 # =========================================================
 # TEXTOS Y MAPAS
@@ -122,24 +201,28 @@ def extraer_minera_desde_tag(tag: str) -> str:
     if not tag:
         return ""
 
-    for minera in sorted(MINERAS_VALIDAS, key=len, reverse=True):
-        if tag.startswith(minera):
-            return minera
+    if tag.startswith("MELN") or tag.startswith("MEL"):
+        return "MEL"
+    if tag.startswith("GABY"):
+        return "GABY"
+    if tag.startswith("CEN"):
+        return "CEN"
+    if tag.startswith("ANTU"):
+        return "ANTU"
+    if tag.startswith("SPNC"):
+        return "SPNC"
+    if tag.startswith("LOMAS"):
+        return "LOMAS"
+    if tag.startswith("ABRA"):
+        return "ABRA"
+    if tag.startswith("MICH"):
+        return "MICH"
+    if tag.startswith("REF2") or tag.startswith("REF"):
+        return "REF"
+    if tag.startswith("FRANKE"):
+        return "FRANKE"
 
     return ""
-
-
-# =========================================================
-# CARGA
-# =========================================================
-@st.cache_data(show_spinner=False)
-def cargar_excel_desde_archivo(archivo) -> pd.DataFrame:
-    return pd.read_excel(archivo)
-
-
-@st.cache_data(show_spinner=False)
-def cargar_excel_desde_ruta(ruta: str) -> pd.DataFrame:
-    return pd.read_excel(ruta)
 
 
 # =========================================================
@@ -151,7 +234,7 @@ def preparar_datos_base(df_raw: pd.DataFrame):
 
     faltan = [c for c in [COL_TAG, COL_FECHA] if c not in df.columns]
     if faltan:
-        raise ValueError(f"Faltan columnas requeridas en el Excel: {faltan}")
+        raise ValueError(f"Faltan columnas requeridas en la consulta SQL: {faltan}")
 
     df[COL_TAG] = df[COL_TAG].apply(limpiar_tag)
     df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce")
@@ -480,7 +563,9 @@ def construir_proyeccion_reemplazo_mensual(criticidad_mensual: pd.DataFrame):
         "Eventos_Problematicos_Mes",
         "Score_Criticidad_Mes",
         "Riesgo_Mes",
-        "Proyeccion_Reemplazo"
+        "Proyeccion_Reemplazo",
+        "Trimestre",
+        "Semestre"
     ]
 
     return proy[columnas].sort_values(
@@ -999,30 +1084,28 @@ def graficar_recurrencias_mensuales_periodo(
 
 
 # =========================================================
-# CARGA DE ARCHIVO
+# SELECCIÓN DE MINERA Y CARGA DESDE SQL
 # =========================================================
-st.sidebar.header("📂 Carga de datos")
-modo_carga = st.sidebar.radio(
-    "Origen del archivo",
-    options=["Archivo local", "Subir Excel"],
+st.sidebar.header("🏭 Selección de minera")
+
+minera_sel = st.sidebar.selectbox(
+    "Selecciona una minera",
+    options=["Seleccione una minera..."] + MINERAS_VALIDAS,
     index=0
 )
 
-df_raw = None
+if minera_sel == "Seleccione una minera...":
+    st.title("ANÁLISIS DE DATOS POR MINERA")
+    st.info("Selecciona una minera en la barra lateral para comenzar el análisis.")
+    st.stop()
 
-if modo_carga == "Subir Excel":
-    archivo = st.sidebar.file_uploader("Selecciona archivo Excel", type=["xlsx"])
-    if archivo is not None:
-        df_raw = cargar_excel_desde_archivo(archivo)
-    else:
-        st.warning("Carga un archivo Excel para comenzar.")
-        st.stop()
-else:
-    if not RUTA_LOCAL.exists():
-        st.error(f"No encuentro el archivo en la ruta local: {RUTA_LOCAL}")
-        st.info("Pon tu archivo Excel en la ruta configurada o usa 'Subir Excel'.")
-        st.stop()
-    df_raw = cargar_excel_desde_ruta(str(RUTA_LOCAL))
+with st.spinner(f"Cargando datos de {minera_sel} desde Azure SQL..."):
+    df_raw = cargar_datos_sql_por_minera(minera_sel)
+
+if df_raw.empty:
+    st.title(f"ANÁLISIS DE DATOS MINERA {minera_sel}")
+    st.warning(f"No se encontraron registros para la minera {minera_sel}.")
+    st.stop()
 
 # =========================================================
 # PROCESAMIENTO BASE
@@ -1030,33 +1113,11 @@ else:
 try:
     df_base, df_valid_base = preparar_datos_base(df_raw)
 except Exception as e:
-    st.error(f"Error al procesar archivo: {e}")
+    st.error(f"Error al procesar datos SQL: {e}")
     st.stop()
 
 if df_valid_base.empty:
     st.warning("No hay registros válidos después de aplicar limpieza, detección de minera y regla de 9 días.")
-    st.stop()
-
-# =========================================================
-# SELECCIÓN DE MINERA
-# =========================================================
-st.sidebar.header("🏭 Selección de minera")
-
-mineras_disponibles = sorted(df_valid_base["Minera"].dropna().unique().tolist())
-
-if not mineras_disponibles:
-    st.error("No se encontraron mineras válidas en la data.")
-    st.stop()
-
-minera_sel = st.sidebar.selectbox(
-    "Selecciona una minera",
-    options=["Seleccione una minera..."] + mineras_disponibles,
-    index=0
-)
-
-if minera_sel == "Seleccione una minera...":
-    st.title("ANÁLISIS DE DATOS POR MINERA")
-    st.info("Selecciona una minera en la barra lateral para comenzar el análisis.")
     st.stop()
 
 # =========================================================
