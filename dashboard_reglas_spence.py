@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.ticker import MaxNLocator
 from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
+#from urllib.parse import quote_plus
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -45,19 +45,13 @@ MAPA_MINERAS = {
 def get_engine():
     cfg = st.secrets["azure_sql"]
 
-    connection_string = (
-        f"DRIVER={{{cfg['driver']}}};"
-        f"SERVER={cfg['server']};"
-        f"DATABASE={cfg['database']};"
-        f"UID={cfg['username']};"
-        f"PWD={cfg['password']};"
-        f"Encrypt=yes;"
-        f"TrustServerCertificate=no;"
-        f"Connection Timeout=30;"
-    )
+    username = cfg["username"]
+    password = cfg["password"]
+    server = cfg["server"]
+    database = cfg["database"]
 
     return create_engine(
-        f"mssql+pyodbc:///?odbc_connect={quote_plus(connection_string)}",
+        f"mssql+pymssql://{username}:{password}@{server}:1433/{database}",
         pool_pre_ping=True,
         pool_recycle=1800
     )
