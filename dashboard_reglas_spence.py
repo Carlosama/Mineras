@@ -4,8 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.ticker import MaxNLocator
-from sqlalchemy import create_engine, text
-#from urllib.parse import quote_plus
+import pyodbc
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -42,40 +41,35 @@ MAPA_MINERAS = {
 # CONEXIÓN AZURE SQL
 # =========================================================
 @st.cache_resource
-def get_engine():
+def init_connection():
     cfg = st.secrets["azure_sql"]
-
-    username = cfg["username"]
-    password = cfg["password"]
-    server = cfg["server"]
-    database = cfg["database"]
-
-    return create_engine(
-        f"mssql+pymssql://{username}:{password}@{server}:1433/{database}",
-        pool_pre_ping=True,
-        pool_recycle=1800
+    conn_str = (
+        f"DRIVER={{{cfg['driver']}}};"
+        f"SERVER={cfg['server']};"
+        f"DATABASE={cfg['database']};"
+        f"UID={cfg['username']};"
+        f"PWD={cfg['password']};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate=no;"
     )
+    return pyodbc.connect(conn_str)
 
 
-def build_minera_where(minera: str):
+def build_minera_like_patterns(minera: str) -> list[str]:
     aliases = MAPA_MINERAS.get(minera, [minera])
-    condiciones = []
-    params = {}
-
-    for i, alias in enumerate(aliases):
-        key = f"tag{i}"
-        condiciones.append(f"UPPER(LTRIM(RTRIM({COL_TAG}))) LIKE :{key}")
-        params[key] = f"{alias.upper()}%"
-
-    return " OR ".join(condiciones), params
+    return [f"{alias.upper()}%" for alias in aliases]
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cargar_datos_sql_por_minera(minera: str) -> pd.DataFrame:
-    engine = get_engine()
-    where_sql, params = build_minera_where(minera)
+    conn = init_connection()
+    patrones = build_minera_like_patterns(minera)
 
-    query = text(f"""
+    condiciones = " OR ".join(
+        [f"UPPER(LTRIM(RTRIM({COL_TAG}))) LIKE ?" for _ in patrones]
+    )
+
+    query = f"""
         SELECT
             UPPER(LTRIM(RTRIM({COL_TAG}))) AS {COL_TAG},
             {COL_FECHA}
@@ -83,12 +77,11 @@ def cargar_datos_sql_por_minera(minera: str) -> pd.DataFrame:
         WHERE {COL_TAG} IS NOT NULL
           AND LTRIM(RTRIM({COL_TAG})) <> ''
           AND {COL_FECHA} IS NOT NULL
-          AND ({where_sql})
+          AND ({condiciones})
         ORDER BY {COL_FECHA}
-    """)
+    """
 
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params=params)
+    df = pd.read_sql(query, conn, params=patrones)
 
     if df.empty:
         return df
@@ -1093,8 +1086,13 @@ if minera_sel == "Seleccione una minera...":
     st.info("Selecciona una minera en la barra lateral para comenzar el análisis.")
     st.stop()
 
-with st.spinner(f"Cargando datos de {minera_sel} desde Azure SQL..."):
-    df_raw = cargar_datos_sql_por_minera(minera_sel)
+try:
+    with st.spinner(f"Cargando datos de {minera_sel} desde Azure SQL..."):
+        df_raw = cargar_datos_sql_por_minera(minera_sel)
+except Exception as e:
+    st.error("Error al cargar datos desde Azure SQL.")
+    st.exception(e)
+    st.stop()
 
 if df_raw.empty:
     st.title(f"ANÁLISIS DE DATOS MINERA {minera_sel}")
