@@ -3,5 +3,5 @@ pandas
 numpy
 matplotlib
 sqlalchemy
-pyodbc
+pymssql
 openpyxl
